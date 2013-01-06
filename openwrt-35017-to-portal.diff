@@ -1,0 +1,157 @@
+Index: feeds.conf.default
+===================================================================
+--- feeds.conf.default	(revision 35017)
++++ feeds.conf.default	(working copy)
+@@ -1,6 +1,7 @@
+ src-svn packages svn://svn.openwrt.org/openwrt/branches/packages_12.09
+ src-svn xwrt http://x-wrt.googlecode.com/svn/trunk/package
+ src-svn luci http://svn.luci.subsignal.org/luci/branches/luci-0.11/contrib/package
++src-svn accesslabs svn://accesslabs.org/openwrt
+ #src-svn phone svn://svn.openwrt.org/openwrt/feeds/phone
+ #src-svn efl svn://svn.openwrt.org/openwrt/feeds/efl
+ #src-svn xorg svn://svn.openwrt.org/openwrt/feeds/xorg
+Index: target/linux/ar71xx/image/Makefile
+===================================================================
+--- target/linux/ar71xx/image/Makefile	(revision 35017)
++++ target/linux/ar71xx/image/Makefile	(working copy)
+@@ -868,10 +868,10 @@
+ $(eval $(call SingleProfile,TPLINK,$(fs_64kraw),TLWR941NV4,tl-wr941nd-v4,TL-WR741ND,ttyS0,115200,0x09410004,1,4M))
+ $(eval $(call SingleProfile,TPLINK,$(fs_64kraw),TLWR1043,tl-wr1043nd-v1,TL-WR1043ND,ttyS0,115200,0x10430001,1,8M))
+ 
+-$(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLMR11U,tl-mr11u-v1,TL-MR11U,ttyATH0,115200,0x00110101,1,4Mlzma))
++$(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLMR11U,tl-mr11u-v1,TL-MR11U,ttyATH0,115200,0x00110101,1,8Mlzma)) # XXX changed from fourMlzma
+ $(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLMR3020,tl-mr3020-v1,TL-MR3020,ttyATH0,115200,0x30200001,1,4Mlzma))
+ $(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLMR3040,tl-mr3040-v1,TL-MR3040,ttyATH0,115200,0x30400001,1,4Mlzma))
+-$(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLWR703,tl-wr703n-v1,TL-WR703N,ttyATH0,115200,0x07030101,1,4Mlzma))
++$(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLWR703,tl-wr703n-v1,TL-WR703N,ttyATH0,115200,0x07030101,1,8Mlzma))
+ $(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLWR740NV4,tl-wr740n-v4,TL-WR741ND-v4,ttyATH0,115200,0x07400004,1,4Mlzma))
+ $(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLWR741NV4,tl-wr741nd-v4,TL-WR741ND-v4,ttyATH0,115200,0x07410004,1,4Mlzma))
+ $(eval $(call SingleProfile,TPLINK-LZMA,$(fs_64kraw),TLWR841NV8,tl-wr841n-v8,TL-WR841N-v8,ttyS0,115200,0x08410008,1,4Mlzma))
+Index: package/madwifi/files/lib/wifi/madwifi.sh
+===================================================================
+--- package/madwifi/files/lib/wifi/madwifi.sh	(revision 35017)
++++ package/madwifi/files/lib/wifi/madwifi.sh	(working copy)
+@@ -483,13 +483,13 @@
+ 	option macaddr	$(cat /sys/class/net/${dev}/address)
+ $EXTRA_DEV
+ 	# REMOVE THIS LINE TO ENABLE WIFI:
+-	option disabled 1
++#	option disabled 1
+ 
+ config wifi-iface
+ 	option device	radio$devidx
+-	option network	lan
++	option network	wlan
+ 	option mode	ap
+-	option ssid	OpenWrt
++	option ssid	PORTAL
+ 	option encryption none
+ 
+ EOF
+Index: package/mac80211/files/lib/wifi/mac80211.sh
+===================================================================
+--- package/mac80211/files/lib/wifi/mac80211.sh	(revision 35017)
++++ package/mac80211/files/lib/wifi/mac80211.sh	(working copy)
+@@ -582,14 +582,12 @@
+ 	option macaddr	$(cat /sys/class/ieee80211/${dev}/macaddress)
+ 	option hwmode	11${mode_11n}${mode_band}
+ $ht_capab
+-	# REMOVE THIS LINE TO ENABLE WIFI:
+-	option disabled 1
+ 
+ config wifi-iface
+ 	option device   radio$devidx
+-	option network  lan
++	option network  tor
+ 	option mode     ap
+-	option ssid     OpenWrt
++	option ssid     PORTAL
+ 	option encryption none
+ 
+ EOF
+Index: package/firewall/files/firewall.user
+===================================================================
+--- package/firewall/files/firewall.user	(revision 35017)
++++ package/firewall/files/firewall.user	(working copy)
+@@ -2,3 +2,11 @@
+ # Put your custom iptables rules here, they will
+ # be executed with each firewall (re-)start.
+ 
++enable_transparent_tor() {
++  ifname=$(uci get network.tor.ifname)
++
++  iptables -t nat -A PREROUTING -i $ifname -p udp --dport 53 -j REDIRECT --to-ports 9053
++  iptables -t nat -A PREROUTING -i $ifname -p tcp --syn -j REDIRECT --to-ports 9040 
++}
++
++enable_transparent_tor
+Index: package/base-files/files/etc/config/system
+===================================================================
+--- package/base-files/files/etc/config/system	(revision 35017)
++++ package/base-files/files/etc/config/system	(working copy)
+@@ -1,5 +1,5 @@
+ config system
+-	option hostname	OpenWrt
++	option hostname	p0rtal
+ 	option timezone	UTC
+ 
+ config timeserver ntp
+Index: package/base-files/files/etc/sysctl.conf
+===================================================================
+--- package/base-files/files/etc/sysctl.conf	(revision 35017)
++++ package/base-files/files/etc/sysctl.conf	(working copy)
+@@ -1,7 +1,7 @@
+ kernel.panic=3
+ net.ipv4.conf.default.arp_ignore=1
+ net.ipv4.conf.all.arp_ignore=1
+-net.ipv4.ip_forward=1
++net.ipv4.ip_forward=0
+ net.ipv4.icmp_echo_ignore_broadcasts=1
+ net.ipv4.icmp_ignore_bogus_error_responses=1
+ net.ipv4.tcp_ecn=0
+@@ -12,7 +12,7 @@
+ net.ipv4.tcp_sack=1
+ net.ipv4.tcp_dsack=1
+ 
+-net.ipv6.conf.all.forwarding=1
++net.ipv6.conf.all.forwarding=0
+ 
+ net.netfilter.nf_conntrack_acct=1
+ net.netfilter.nf_conntrack_checksum=0
+Index: package/base-files/files/etc/banner
+===================================================================
+--- package/base-files/files/etc/banner	(revision 35017)
++++ package/base-files/files/etc/banner	(working copy)
+@@ -1,16 +1,16 @@
+-  _______                     ________        __
+- |       |.-----.-----.-----.|  |  |  |.----.|  |_
+- |   -   ||  _  |  -__|     ||  |  |  ||   _||   _|
+- |_______||   __|_____|__|__||________||__|  |____|
+-          |__| W I R E L E S S   F R E E D O M
+- -----------------------------------------------------
+- ATTITUDE ADJUSTMENT (%C, %R)
+- -----------------------------------------------------
+-  * 1/4 oz Vodka      Pour all ingredients into mixing
+-  * 1/4 oz Gin        tin with ice, strain into glass.
+-  * 1/4 oz Amaretto
+-  * 1/4 oz Triple sec
+-  * 1/4 oz Peach schnapps
+-  * 1/4 oz Sour mix
+-  * 1 splash Cranberry juice
+- -----------------------------------------------------
++
++[1;34m __________________ __________________________  .____     
++[1;34m \______   \_____  \ ______   \__    ___/  _  \ |    |    
++[1;34m  |     ___//   |   \|       _/ |    | /  /_\  \|    |    
++[1;34m  |    |   /    |    \    |   \ |    |/    |    \    |___ 
++[1;34m  |____|   \_______  /____|_  / |____|\____|__  /_______ \ 
++[1;37m  -----------------[1;34m\/[1;37m-------[1;34m\/[1;37m----------------[1;34m\/[1;37m--------[1;34m\/
++                                                [1;34mver. [0m%V
++       [1;37mP[0mersonal [1;37mO[0mnion [1;37mR[0mouter [1;37mT[0mo [1;37mA[0mssure [1;37mL[0miberty             
++                                                         
++  ------------------------------------------------------
++     Built on OpenWRT  ATTITUDE ADJUSTMENT (%R)
++  ------------------------------------------------------
++
++              -- No logs - No crime --                  
++
