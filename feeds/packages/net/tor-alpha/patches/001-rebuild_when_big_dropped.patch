@@ -1,0 +1,37 @@
+diff -uNr tor-0.2.3.11-alpha/src/or/microdesc.c tor-0.2.3.11-alpha-rebuild_when_big_dropped/src/or/microdesc.c
+--- tor-0.2.3.11-alpha/src/or/microdesc.c	2012-01-21 22:07:29.000000000 -0500
++++ tor-0.2.3.11-alpha-rebuild_when_big_dropped/src/or/microdesc.c	2012-02-07 12:16:52.139285083 -0500
+@@ -375,16 +375,14 @@
+ static int
+ should_rebuild_md_cache(microdesc_cache_t *cache)
+ {
+-    const size_t old_len =
+-      cache->cache_content ? cache->cache_content->size : 0;
+     const size_t journal_len = cache->journal_len;
+     const size_t dropped = cache->bytes_dropped;
+ 
+     if (journal_len < 16384)
+       return 0; /* Don't bother, not enough has happened yet. */
+-    if (dropped > (journal_len + old_len) / 3)
+-      return 1; /* We could save 1/3 or more of the currently used space. */
+-    if (journal_len > old_len / 2)
++    if (dropped > 1<<18)
++      return 1; /* We could save 256KiB or more of the currently used space. */
++    if (journal_len > 1<<19)
+       return 1; /* We should append to the regular file */
+ 
+     return 0;
+diff -uNr tor-0.2.3.11-alpha/src/or/routerlist.c tor-0.2.3.11-alpha-rebuild_when_big_dropped/src/or/routerlist.c
+--- tor-0.2.3.11-alpha/src/or/routerlist.c	2012-01-21 22:07:30.000000000 -0500
++++ tor-0.2.3.11-alpha-rebuild_when_big_dropped/src/or/routerlist.c	2012-02-07 12:14:55.226311557 -0500
+@@ -597,8 +597,8 @@
+ router_should_rebuild_store(desc_store_t *store)
+ {
+   if (store->store_len > (1<<16))
+-    return (store->journal_len > store->store_len / 2 ||
+-            store->bytes_dropped > store->store_len / 2);
++    return (store->journal_len > (1<<20) ||
++            store->bytes_dropped > (1<<18));
+   else
+     return store->journal_len > (1<<15);
+ }

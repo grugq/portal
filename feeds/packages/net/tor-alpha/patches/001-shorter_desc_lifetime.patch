@@ -1,0 +1,30 @@
+diff -uNr tor-0.2.3.15-alpha/src/or/microdesc.c tor-0.2.3.15-alpha-shorter_desc_lifetime//src/or/microdesc.c
+--- tor-0.2.3.15-alpha/src/or/microdesc.c	2012-04-29 17:07:09.000000000 -0400
++++ tor-0.2.3.15-alpha-shorter_desc_lifetime//src/or/microdesc.c	2012-05-21 12:56:41.516557041 -0400
+@@ -327,7 +327,7 @@
+ 
+ /** By default, we remove any microdescriptors that have gone at least this
+  * long without appearing in a current consensus. */
+-#define TOLERATE_MICRODESC_AGE (7*24*60*60)
++#define TOLERATE_MICRODESC_AGE (3*24*60*60)
+ 
+ /** Remove all microdescriptors from <b>cache</b> that haven't been listed for
+  * a long time.  Does not rebuild the cache on disk.  If <b>cutoff</b> is
+diff -uNr tor-0.2.3.15-alpha/src/or/or.h tor-0.2.3.15-alpha-shorter_desc_lifetime//src/or/or.h
+--- tor-0.2.3.15-alpha/src/or/or.h	2012-04-29 17:07:09.000000000 -0400
++++ tor-0.2.3.15-alpha-shorter_desc_lifetime//src/or/or.h	2012-05-21 12:58:50.860561469 -0400
+@@ -184,12 +184,12 @@
+ 
+ /** How old do we allow a router to get before removing it
+  * from the router list? In seconds. */
+-#define ROUTER_MAX_AGE (60*60*48)
++#define ROUTER_MAX_AGE (60*60*24)
+ /** How old can a router get before we (as a server) will no longer
+  * consider it live? In seconds. */
+ #define ROUTER_MAX_AGE_TO_PUBLISH (60*60*24)
+ /** How old do we let a saved descriptor get before force-removing it? */
+-#define OLD_ROUTER_DESC_MAX_AGE (60*60*24*5)
++#define OLD_ROUTER_DESC_MAX_AGE (60*60*24)
+ 
+ /** Possible rules for generating circuit IDs on an OR connection. */
+ typedef enum {

@@ -1,0 +1,957 @@
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/common/gzutil.c tor-0.2.3.16-alpha-gzipped_cache//src/common/gzutil.c
+--- tor-0.2.3.16-alpha-anon_mmap//src/common/gzutil.c	1969-12-31 19:00:00.000000000 -0500
++++ tor-0.2.3.16-alpha-gzipped_cache//src/common/gzutil.c	2012-06-09 14:42:20.538428664 -0400
+@@ -0,0 +1,298 @@
++/* Copyright (c) 2003, Roger Dingledine
++ * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
++ * Copyright (c) 2007-2011, The Tor Project, Inc. */
++/* See LICENSE for licensing information */
++
++/**
++ * \file gzutil.c
++ * \brief Common functions for gzipped files.
++ **/
++
++#include "orconfig.h"
++#include "util.h"
++#include "gzutil.h"
++#include "torlog.h"
++#undef log
++#include "torint.h"
++#include "container.h"
++
++#ifdef MS_WINDOWS
++#include <io.h>
++#endif
++
++#include <stdlib.h>
++#include <stdio.h>
++
++#ifdef HAVE_ERRNO_H
++#include <errno.h>
++#endif
++#ifdef HAVE_UNISTD_H
++#include <unistd.h>
++#endif
++#ifdef HAVE_SYS_STAT_H
++#include <sys/stat.h>
++#endif
++#ifdef HAVE_SYS_FCNTL_H
++#include <sys/fcntl.h>
++#endif
++#ifdef HAVE_FCNTL_H
++#include <fcntl.h>
++#endif
++#ifdef HAVE_SYS_MMAN_H
++#include <sys/mman.h>
++#endif
++
++/** Represents a file that we're writing to, with support for atomic commit:
++ *  we can write into a temporary file, and either remove the file on
++ *  failure, or replace the original file on success. */
++struct gzopen_file_t {
++  char *filename; /**< Name of the original file. */
++  unsigned binary:1; /**< Did we open in binary mode? */
++  int fd; /**< fd for the open file. */
++  gzFile gzf; /**< gzip wrapper for <b>fb</b>. */
++};
++
++/** Write <b>count</b> bytes from <b>buf</b> to <b>fd</b>.
++ * Return the number of bytes written, or -1
++ * on error.  Only use if fd is a blocking fd.  */
++ssize_t
++gzwrite_all(gzFile gzf, const char *buf, size_t count)
++{
++  size_t written = 0;
++  ssize_t result;
++  tor_assert(count < SSIZE_T_MAX);
++
++  while (written != count) {
++    result = gzwrite(gzf, buf+written, count-written);
++    if (result<0)
++      return -1;
++    written += result;
++  }
++  return (ssize_t)count;
++}
++
++/** Read from <b>fd</b> to <b>buf</b>, until we get <b>count</b> bytes
++ * or reach the end of the file. 
++ * Return the number of bytes read, or -1 on error. Only use
++ * if fd is a blocking fd. */
++ssize_t
++gzread_all(gzFile gzf, char *buf, size_t count)
++{
++  size_t numread = 0;
++  ssize_t result;
++
++  if (count > SIZE_T_CEILING || count > SSIZE_T_MAX)
++    return -1;
++
++  while (numread != count) {
++    result = gzread(gzf, buf+numread, count-numread);
++    if (result<0)
++      return -1;
++    else if (result == 0)
++      break;
++    numread += result;
++  }
++  return (ssize_t)numread;
++}
++
++/** Try to start writing to the file in <b>fname</b>, passing the flags
++ * <b>open_flags</b> to the open() syscall, creating the file (if needed) with
++ * access value <b>mode</b>.  We open a new temporary file in the same
++ * directory, and either replace the original or remove the temporary file
++ * when we're done.
++ *
++ * Return the gzip descriptor for the newly opened file, and store working data in
++ * *<b>data_out</b>.  The caller should not close the descriptor manually:
++ * instead, call finish_writing_to_file() or abort_writing_to_file().
++ * Returns NULL on failure.
++ */
++gzFile
++gzstart_writing_to_file(const char *fname, int open_flags, int mode,
++                      gzopen_file_t **data_out)
++{
++  gzopen_file_t *new_file = tor_malloc_zero(sizeof(gzopen_file_t));
++  const char *open_name;
++
++  tor_assert(fname);
++  tor_assert(data_out);
++#if (O_BINARY != 0 && O_TEXT != 0)
++  tor_assert((open_flags & (O_BINARY|O_TEXT)) != 0);
++#endif
++  new_file->fd = -1;
++  open_name = new_file->filename = tor_strdup(fname);
++  open_flags |= O_CREAT;
++  open_flags &= ~O_EXCL;
++  if (open_flags & O_BINARY)
++    new_file->binary = 1;
++
++  new_file->fd = open(open_name, open_flags, mode);
++  if (new_file->fd < 0) {
++    log_warn(LD_FS, "Couldn't open \"%s\" (%s) for writing: %s",
++        open_name, fname, strerror(errno));
++    goto err;
++  }
++
++  /* Open the gzip descriptor */
++  new_file->gzf = gzdopen (new_file->fd, (open_flags & O_APPEND)?"a":"w");
++  if (!new_file->gzf) {
++    log_warn(LD_FS,"Error opening gzipped file \"%s\": %s", open_name,
++             strerror(errno));
++    goto err;
++  }
++
++  *data_out = new_file;
++
++  return new_file->gzf;
++
++ err:
++  if (new_file->fd >= 0)
++    close(new_file->fd);
++  *data_out = NULL;
++  tor_free(new_file->filename);
++  tor_free(new_file);
++  return NULL;
++}
++
++/** Helper function: close and free the underlying file and memory in
++ * <b>file_data</b>.  If we were writing into a temporary file, then delete
++ * that file (if abort_write is true) or replaces the target file with
++ * the temporary file (if abort_write is false). */
++static int
++gzfinish_writing_to_file_impl(gzopen_file_t *file_data, int abort_write)
++{
++  int r = 0;
++  tor_assert(file_data && file_data->filename);
++  if (gzclose(file_data->gzf)!=Z_OK) {
++    log_warn(LD_FS, "Error closing \"%s\": %s", file_data->filename,
++               strerror(errno));
++    abort_write = r = -1;
++    close(file_data->fd);
++  }
++
++  tor_free(file_data->filename);
++  tor_free(file_data);
++
++  return r;
++}
++
++/** Finish writing to <b>file_data</b>: close the file handle, free memory as
++ * needed, and if using a temporary file, replace the original file with
++ * the temporary file. */
++int
++gzfinish_writing_to_file(gzopen_file_t *file_data)
++{
++  return gzfinish_writing_to_file_impl(file_data, 0);
++}
++
++/** Finish writing to <b>file_data</b>: close the file handle, free memory as
++ * needed, and if using a temporary file, delete it. */
++int
++gzabort_writing_to_file(gzopen_file_t *file_data)
++{
++  return gzfinish_writing_to_file_impl(file_data, 1);
++}
++
++/** Helper: given a set of flags as passed to open(2), open the file
++ * <b>fname</b> and write all the sized_chunk_t structs in <b>chunks</b> to
++ * the file.  Do so as atomically as possible e.g. by opening temp files and
++ * renaming. */
++static int
++gzwrite_chunks_to_file_impl(const char *fname, const smartlist_t *chunks,
++                          int open_flags)
++{
++  gzopen_file_t *file = NULL;
++  ssize_t result;
++  gzFile gzf = gzstart_writing_to_file(fname, open_flags, 0600, &file);
++  if (gzf==NULL)
++    return -1;
++  SMARTLIST_FOREACH(chunks, sized_chunk_t *, chunk,
++  {
++    result = gzwrite_all(gzf, chunk->bytes, chunk->len);
++    if (result < 0) {
++      log_warn(LD_FS, "Error writing to \"%s\": %s", fname,
++          strerror(errno));
++      goto err;
++    }
++    tor_assert((size_t)result == chunk->len);
++  });
++
++  return gzfinish_writing_to_file(file);
++ err:
++  gzabort_writing_to_file(file);
++  return -1;
++}
++
++/** Given a smartlist of sized_chunk_t, write them atomically to a file
++ * <b>fname</b>, overwriting or creating the file as necessary. */
++int
++gzwrite_chunks_to_file(const char *fname, const smartlist_t *chunks, int bin)
++{
++  int flags = OPEN_FLAGS_REPLACE|(bin?O_BINARY:O_TEXT);
++  return gzwrite_chunks_to_file_impl(fname, chunks, flags);
++}
++
++/** As write_bytes_to_file, but if the file already exists, append the bytes
++ *  * to the end of the file instead of overwriting it. */
++int
++gzappend_bytes_to_file(const char *fname, const char *str, size_t len,
++                     int bin)
++{
++  int r;
++  sized_chunk_t c = { str, len };
++  smartlist_t *chunks = smartlist_new();
++  smartlist_add(chunks, &c);
++  r = gzwrite_chunks_to_file_impl(fname, chunks,
++                                  OPEN_FLAGS_APPEND|(bin?O_BINARY:O_TEXT));
++  smartlist_free(chunks);
++  return r;
++}
++
++/** Uncompress contents of <b>filename</b> into a an
++ *  anonymous map; return 0 on success. New data will be appended
++ *  to existing data in the map. The map size will be increased if
++ *  it's too small */
++int
++gzload_file_into_mmap(tor_mmap_t *handle, const char *filename)
++{
++  gzFile gzf; /* router file */
++  ssize_t r;
++
++  tor_assert(filename);
++
++  if (!(gzf = gzopen(filename, "rb"))) {
++    int save_errno = errno;
++    log_info(LD_FS,"Could not open \"%s\": %s",filename,
++           strerror(errno));
++    errno = save_errno;
++    return -1;
++  }
++
++  /* While there's enough data to fill up the map, fill it and increase the map size */
++  do {
++    /* When the current map is full, increase its size */
++    if (handle->size==handle->mapping_size && tor_mremap_inc(handle)) {
++      int save_errno = errno;
++      log_err(LD_FS,"Could not increase the anonymous memory mmaping while reading from file \"%s\"", filename);
++      gzclose(gzf);
++      errno = save_errno;
++      return -1;
++    }
++
++    /* Fill the map with data */
++    r = gzread(gzf,(void*)handle->data+handle->size,handle->mapping_size-handle->size);
++    if (r<0) {
++      int save_errno = errno;
++      log_warn(LD_FS,"Error reading from file \"%s\": %s", filename,
++             strerror(errno));
++      gzclose(gzf);
++      errno = save_errno;
++      return -1;
++    }
++    handle->size+=r;
++
++    /* Repeat if we haven't reached the end of the file */
++  } while (r);
++
++  gzclose(gzf);
++  return 0;
++}
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/common/gzutil.h tor-0.2.3.16-alpha-gzipped_cache//src/common/gzutil.h
+--- tor-0.2.3.16-alpha-anon_mmap//src/common/gzutil.h	1969-12-31 19:00:00.000000000 -0500
++++ tor-0.2.3.16-alpha-gzipped_cache//src/common/gzutil.h	2012-06-11 18:29:08.043767984 -0400
+@@ -0,0 +1,47 @@
++/* Copyright (c) 2003-2004, Roger Dingledine
++ * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
++ * Copyright (c) 2007-2011, The Tor Project, Inc. */
++/* See LICENSE for licensing information */
++
++/**
++ * \file gzutil.h
++ * \brief Headers for gzutil.c
++ **/
++
++#ifndef _TOR_GZUTIL_H
++#define _TOR_GZUTIL_H
++
++#include "orconfig.h"
++#include "torint.h"
++#include "compat.h"
++#include "di_ops.h"
++#include "util.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++#include <zlib.h>
++
++#ifndef O_BINARY
++#define O_BINARY 0
++#endif
++#ifndef O_TEXT
++#define O_TEXT 0
++#endif
++
++typedef struct gzopen_file_t gzopen_file_t;
++
++int gzwrite_chunks_to_file(const char *fname, const struct smartlist_t *chunks,
++                     int bin);
++
++int gzload_file_into_mmap(tor_mmap_t *handle, const char *filename);
++
++ssize_t gzwrite_all(gzFile gzf, const char *buf, size_t count);
++
++gzFile gzstart_writing_to_file(const char *fname, int open_flags, int mode,
++                      gzopen_file_t **data_out);
++int gzfinish_writing_to_file(gzopen_file_t *file_data);
++int gzabort_writing_to_file(gzopen_file_t *file_data);
++int gzappend_bytes_to_file(const char *fname, const char *str, size_t len,
++                     int bin);
++
++#endif
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/common/Makefile.am tor-0.2.3.16-alpha-gzipped_cache//src/common/Makefile.am
+--- tor-0.2.3.16-alpha-anon_mmap//src/common/Makefile.am	2012-06-02 01:01:17.000000000 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/common/Makefile.am	2012-06-09 14:42:20.538428664 -0400
+@@ -21,6 +21,7 @@
+   mempool.c					\
+   procmon.c					\
+   util.c					\
++  gzutil.c					\
+   util_codedigest.c				\
+   $(libor_extra_source)
+ 
+@@ -51,7 +52,8 @@
+   torint.h					\
+   torlog.h					\
+   tortls.h					\
+-  util.h
++  util.h					\
++  gzutil.h
+ 
+ common_sha1.i: $(libor_SOURCES) $(libor_crypto_a_SOURCES) $(noinst_HEADERS)
+ 	if test "@SHA1SUM@" != none; then \
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/common/Makefile.in tor-0.2.3.16-alpha-gzipped_cache//src/common/Makefile.in
+--- tor-0.2.3.16-alpha-anon_mmap//src/common/Makefile.in	2012-06-05 12:09:50.000000000 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/common/Makefile.in	2012-06-09 14:42:20.586428664 -0400
+@@ -61,14 +61,14 @@
+ libor_a_AR = $(AR) $(ARFLAGS)
+ libor_a_LIBADD =
+ am__libor_a_SOURCES_DIST = address.c compat.c container.c di_ops.c \
+-	log.c memarea.c mempool.c procmon.c util.c util_codedigest.c \
++	log.c memarea.c mempool.c procmon.c util.c gzutil.c util_codedigest.c \
+ 	OpenBSD_malloc_Linux.c
+ @USE_OPENBSD_MALLOC_TRUE@am__objects_1 =  \
+ @USE_OPENBSD_MALLOC_TRUE@	OpenBSD_malloc_Linux.$(OBJEXT)
+ am_libor_a_OBJECTS = address.$(OBJEXT) compat.$(OBJEXT) \
+ 	container.$(OBJEXT) di_ops.$(OBJEXT) log.$(OBJEXT) \
+ 	memarea.$(OBJEXT) mempool.$(OBJEXT) procmon.$(OBJEXT) \
+-	util.$(OBJEXT) util_codedigest.$(OBJEXT) $(am__objects_1)
++	util.$(OBJEXT) gzutil.$(OBJEXT) util_codedigest.$(OBJEXT) $(am__objects_1)
+ libor_a_OBJECTS = $(am_libor_a_OBJECTS)
+ DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)
+ depcomp = $(SHELL) $(top_srcdir)/depcomp
+@@ -227,6 +227,7 @@
+   mempool.c					\
+   procmon.c					\
+   util.c					\
++  gzutil.c					\
+   util_codedigest.c				\
+   $(libor_extra_source)
+ 
+@@ -256,7 +257,8 @@
+   torint.h					\
+   torlog.h					\
+   tortls.h					\
+-  util.h
++  util.h					\
++  gzutil.h
+ 
+ all: all-am
+ 
+@@ -329,6 +331,7 @@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/torgzip.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/tortls.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/util.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/gzutil.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/util_codedigest.Po@am__quote@
+ 
+ .c.o:
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/or/microdesc.c tor-0.2.3.16-alpha-gzipped_cache//src/or/microdesc.c
+--- tor-0.2.3.16-alpha-anon_mmap//src/or/microdesc.c	2012-06-09 14:32:35.158408624 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/or/microdesc.c	2012-06-11 18:26:25.163762408 -0400
+@@ -13,10 +13,13 @@
+ #include "router.h"
+ #include "routerlist.h"
+ #include "routerparse.h"
++#include "gzutil.h"
+ 
+-/** A data structure to hold a bunch of cached microdescriptors.  There are
+- * two active files in the cache: a "cache file" that we mmap, and a "journal
+- * file" that we append to.  Periodically, we rebuild the cache file to hold
++#include <zlib.h>
++
++/** A data structure to hold a bunch of cached microdescriptors.  There is
++ * one active file in the cache: it's a main "cache file", and we also append
++ * the journal to it. Periodically, we rebuild the cache file to hold
+  * only the microdescriptors that we want to keep */
+ struct microdesc_cache_t {
+   /** Map from sha256-digest to microdesc_t for every microdesc_t in the
+@@ -25,8 +28,8 @@
+ 
+   /** Name of the cache file. */
+   char *cache_fname;
+-  /** Name of the journal file. */
+-  char *journal_fname;
++  /** Name of the old file. */
++  char *cache_faltname;
+   /** Mmap'd contents of the cache file, or NULL if there is none. */
+   tor_mmap_t *cache_content;
+   /** Number of bytes used in the journal file. */
+@@ -75,12 +78,12 @@
+                              : md->body;
+ }
+ 
+-/** Write the body of <b>md</b> into <b>f</b>, with appropriate annotations.
++/** Write the body of <b>md</b> into <b>gzf</b>, with appropriate annotations.
+  * On success, return the total number of bytes written, and set
+  * *<b>annotation_len_out</b> to the number of bytes written as
+  * annotations. */
+ static ssize_t
+-dump_microdescriptor(FILE *f, microdesc_t *md, size_t *annotation_len_out)
++gzdump_microdescriptor(gzFile gzf, microdesc_t *md, size_t *annotation_len_out)
+ {
+   ssize_t r = 0;
+   size_t written;
+@@ -90,24 +93,24 @@
+     char annotation[ISO_TIME_LEN+32];
+     format_iso_time(buf, md->last_listed);
+     tor_snprintf(annotation, sizeof(annotation), "@last-listed %s\n", buf);
+-    if (fputs(annotation, f) < 0) {
++    r += strlen(annotation);
++    if (gzwrite_all(gzf, annotation, r) < r) {
+       log_warn(LD_DIR,
+                "Couldn't write microdescriptor annotation: %s",
+-               strerror(ferror(f)));
++               gzerror(gzf, NULL));
+       return -1;
+     }
+-    r += strlen(annotation);
+     *annotation_len_out = r;
+   } else {
+     *annotation_len_out = 0;
+   }
+ 
+-  written = fwrite(microdesc_get_body(md), 1, md->bodylen, f);
++  written = gzwrite_all(gzf, microdesc_get_body(md), md->bodylen);
+   if (written != md->bodylen) {
+     log_warn(LD_DIR,
+              "Couldn't dump microdescriptor (wrote %lu out of %lu): %s",
+              (unsigned long)written, (unsigned long)md->bodylen,
+-             strerror(ferror(f)));
++             gzerror(gzf, NULL));
+     return -1;
+   }
+   r += md->bodylen;
+@@ -128,10 +131,12 @@
+     cache->cache_content->data = NULL;
+     cache->cache_content->size = cache->cache_content->mapping_size = 0;
+     HT_INIT(microdesc_map, &cache->map);
+-    cache->cache_fname = get_datadir_fname("cached-microdescs");
+-    cache->journal_fname = get_datadir_fname("cached-microdescs.new");
+-    microdesc_cache_reload(cache);
++    cache->cache_fname = get_datadir_fname("cached-microdescs.gz");
++    cache->cache_faltname = get_datadir_fname("cached-microdescs");
++    /* update the global variable here as we may refer to it
++     * during reload/rebuild (while writing bodies to file) */
+     the_microdesc_cache = cache;
++    microdesc_cache_reload(cache);
+   }
+   return the_microdesc_cache;
+ }
+@@ -208,18 +213,18 @@
+                              int no_save)
+ {
+   smartlist_t *added;
+-  open_file_t *open_file = NULL;
+-  FILE *f = NULL;
++  gzopen_file_t *open_file = NULL;
++  gzFile gzf = NULL;
+   //  int n_added = 0;
+   ssize_t size = 0;
+ 
+   if (where == SAVED_NOWHERE && !no_save) {
+-    f = start_writing_to_stdio_file(cache->journal_fname,
++    gzf = gzstart_writing_to_file(cache->cache_fname,
+                                     OPEN_FLAGS_APPEND|O_BINARY,
+                                     0600, &open_file);
+-    if (!f) {
++    if (!gzf) {
+       log_warn(LD_DIR, "Couldn't append to journal in %s: %s",
+-               cache->journal_fname, strerror(errno));
++               cache->cache_fname, strerror(errno));
+       return NULL;
+     }
+   }
+@@ -240,13 +245,13 @@
+     }
+ 
+     /* Okay, it's a new one. */
+-    if (f) {
++    if (gzf) {
+       size_t annotation_len;
+       /* Write it to the file */
+-      size = dump_microdescriptor(f, md, &annotation_len);
++      size = gzdump_microdescriptor(gzf, md, &annotation_len);
+       if (size < 0) {
+         /* we already warned in dump_microdescriptor; */
+-        abort_writing_to_file(open_file);
++        gzabort_writing_to_file(open_file);
+         smartlist_clear(added);
+         return added;
+       }
+@@ -275,8 +280,8 @@
+     cache->total_len_seen += md->bodylen;
+   } SMARTLIST_FOREACH_END(md);
+ 
+-  if (f)
+-    finish_writing_to_file(open_file); /*XXX Check me.*/
++  if (gzf)
++    gzfinish_writing_to_file(open_file); /*XXX Check me.*/
+ 
+   {
+     networkstatus_t *ns = networkstatus_get_latest_consensus();
+@@ -320,11 +325,22 @@
+ 
+   microdesc_cache_clear(cache);
+ 
+-  load_file_into_mmap(cache->cache_content, cache->cache_fname);
+-  size_t cache_size = cache->cache_content->size;
+-
+-  load_file_into_mmap(cache->cache_content, cache->journal_fname);
+-  cache->journal_len = cache->cache_content->size - cache_size;
++  /* Load the cache file into an anonymous map first */
++  if (gzload_file_into_mmap(cache->cache_content, cache->cache_fname) &&
++      cache->cache_faltname) {
++    log_notice(LD_DIR, "Couldn't read %s; trying to load routers from old "
++                       "uncompressed location %s.",
++               cache->cache_fname, cache->cache_faltname);
++    /* Read the old cache */
++    if (file_status(cache->cache_faltname) == FN_FILE)
++      load_file_into_mmap(cache->cache_content, cache->cache_faltname);
++    /* Load the old journal */
++    char *altname;
++    if (tor_asprintf(&altname, "%s.new", cache->cache_faltname)!=-1 &&
++        file_status(altname) == FN_FILE)
++      load_file_into_mmap(cache->cache_content, altname);
++    tor_free(altname);
++  }
+ 
+   if (cache->cache_content->size) {
+     added = microdescs_add_to_cache(cache, cache->cache_content->data,
+@@ -334,12 +350,13 @@
+       total += smartlist_len(added);
+       smartlist_free(added);
+     }
++    /* Force rebuild because we don't know how much of the
++     * cache file had been journaled */
++    microdesc_cache_rebuild(cache, 1);
+   }
+   log_notice(LD_DIR, "Reloaded microdescriptor cache.  Found %d descriptors.",
+              total);
+ 
+-  microdesc_cache_rebuild(cache, 0 /* don't force */);
+-
+   return 0;
+ }
+ 
+@@ -409,15 +426,15 @@
+     return 0;
+ }
+ 
+-/** Regenerate the main cache file for <b>cache</b>, clear the journal file,
++/** Regenerate the main cache file for <b>cache</b>
+  * and update every microdesc_t in the cache with pointers to its new
+  * location.  If <b>force</b> is true, do this unconditionally.  If
+  * <b>force</b> is false, do it only if we expect to save space on disk. */
+ int
+ microdesc_cache_rebuild(microdesc_cache_t *cache, int force)
+ {
+-  open_file_t *open_file;
+-  FILE *f;
++  gzopen_file_t *open_file;
++  gzFile gzf;
+   microdesc_t **mdp;
+   smartlist_t *wrote;
+   ssize_t size;
+@@ -440,10 +457,10 @@
+ 
+   orig_size = (int)(cache->cache_content ? cache->cache_content->size : 0);
+ 
+-  f = start_writing_to_stdio_file(cache->cache_fname,
++  gzf = gzstart_writing_to_file(cache->cache_fname,
+                                   OPEN_FLAGS_REPLACE|O_BINARY,
+                                   0600, &open_file);
+-  if (!f)
++  if (!gzf)
+     return -1;
+ 
+   wrote = smartlist_new();
+@@ -454,7 +471,7 @@
+     if (md->no_save)
+       continue;
+ 
+-    size = dump_microdescriptor(f, md, &annotation_len);
++    size = gzdump_microdescriptor(gzf, md, &annotation_len);
+     if (size < 0) {
+       /* XXX handle errors from dump_microdescriptor() */
+       /* log?  return -1?  die?  coredump the universe? */
+@@ -473,9 +490,9 @@
+   if (cache->cache_content->data)
+     tor_munmap(cache->cache_content);
+ 
+-  finish_writing_to_file(open_file); /*XXX Check me.*/
++  gzfinish_writing_to_file(open_file); /*XXX Check me.*/
+ 
+-  if (load_file_into_mmap(cache->cache_content, cache->cache_fname) && smartlist_len(wrote)) {
++  if (gzload_file_into_mmap(cache->cache_content, cache->cache_fname) && smartlist_len(wrote)) {
+     log_err(LD_DIR, "Couldn't map file that we just wrote to %s!",
+             cache->cache_fname);
+     smartlist_free(wrote);
+@@ -503,11 +520,10 @@
+ 
+   smartlist_free(wrote);
+ 
+-  write_str_to_file(cache->journal_fname, "", 1);
+   cache->journal_len = 0;
+   cache->bytes_dropped = 0;
+ 
+-  new_size = (int)cache->cache_content->size;
++  new_size = cache->cache_content ? (int)cache->cache_content->size : 0;
+   log_info(LD_DIR, "Done rebuilding microdesc cache. "
+            "Saved %d bytes; %d still used.",
+            orig_size-new_size, new_size);
+@@ -602,7 +618,7 @@
+   if (the_microdesc_cache) {
+     microdesc_cache_clear(the_microdesc_cache);
+     tor_free(the_microdesc_cache->cache_fname);
+-    tor_free(the_microdesc_cache->journal_fname);
++    tor_free(the_microdesc_cache->cache_faltname);
+     tor_free(the_microdesc_cache->cache_content);
+     tor_free(the_microdesc_cache);
+   }
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/or/or.h tor-0.2.3.16-alpha-gzipped_cache//src/or/or.h
+--- tor-0.2.3.16-alpha-anon_mmap//src/or/or.h	2012-06-09 14:28:32.798400326 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/or/or.h	2012-06-09 14:42:20.590428665 -0400
+@@ -1633,14 +1633,16 @@
+   /** The descriptor isn't stored on disk at all: the copy in memory is
+    * canonical; the saved_offset field is meaningless. */
+   SAVED_NOWHERE=0,
+-  /** The descriptor is stored in the cached_routers file or in the journal.
+-   * In both cases the body is kept in the anonymous mmap: the
++  /** The descriptor is stored in the cached_routers file: the
+    * signed_descriptor_body is meaningless; the signed_descriptor_len and
+-   * saved_offset are used to index into the memory map. */
++   * saved_offset are used to index into the mmaped cache file. */
+   SAVED_IN_CACHE,
+-  /** The descriptor is stored in the cached_routers.new file but we've
+-   * failed to get space in the anonymous mmap (memory error). The
++  /** The descriptor is stored in the cached_routers.new file: the
+    * signed_descriptor_body and saved_offset fields are both set. */
++  /* FFFF (We could also mmap the file and grow the mmap as needed, or
++   * lazy-load the descriptor text by using seek and read.  We don't, for
++   * now.)
++   */
+   SAVED_IN_JOURNAL
+ } saved_location_t;
+ 
+@@ -1694,8 +1696,8 @@
+   download_status_t ei_dl_status;
+   /** Where is the descriptor saved? */
+   saved_location_t saved_location;
+-  /** The position of the body in anonymous memory map dedicated to holding
+-   * descriptors that are saved in files. */
++  /** If saved_location is SAVED_IN_CACHE or SAVED_IN_JOURNAL, the offset of
++   * this descriptor in the corresponding file. */
+   off_t saved_offset;
+   /** What position is this descriptor within routerlist->routers or
+    * routerlist->old_routers? -1 for none. */
+@@ -1947,11 +1949,11 @@
+   unsigned int held_by_nodes;
+ 
+   /** If saved_location == SAVED_IN_CACHE, this field holds the offset of the
+-   * microdescriptor in the file that holds it cache. */
++   * microdescriptor in the cache. */
+   off_t off;
+ 
+   /** If saved_location == SAVED_IN_CACHE, this field holds the offset to the
+-   * microdescriptor body in the anonymous memory map */
++   * microdescriptor body in memory relative to the cache. */
+   size_t cache_offset;
+ 
+   /* The string containing the microdesc. */
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/or/routerlist.c tor-0.2.3.16-alpha-gzipped_cache//src/or/routerlist.c
+--- tor-0.2.3.16-alpha-anon_mmap//src/or/routerlist.c	2012-06-09 14:28:32.802400324 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/or/routerlist.c	2012-06-09 14:42:20.594428666 -0400
+@@ -33,6 +33,7 @@
+ #include "router.h"
+ #include "routerlist.h"
+ #include "routerparse.h"
++#include "gzutil.h"
+ 
+ // #define DEBUG_ROUTERLIST
+ 
+@@ -583,15 +584,17 @@
+ 
+ /* Router descriptor storage.
+  *
+- * Routerdescs are stored in a big file, named "cached-descriptors".  As new
+- * routerdescs arrive, we append them to a journal file named
+- * "cached-descriptors.new".
++ * Routerdescs are stored in a big file, named "cached-descriptors.gz".  As new
++ * routerdescs arrive, we append them there instead of a separate journal file.
+  *
+- * From time to time, we replace "cached-descriptors" with a new file
+- * containing only the live, non-superseded descriptors, and clear
+- * cached-routers.new.
++ * From time to time, we replace "cached-descriptors.gz" with a new file
++ * containing only the live, non-superseded descriptors.
+  *
+- * On startup, we read both files.
++ * On startup, if we haven't read anything from "cached-descriptors.gz", we try
++ * to read uncompressed data files from a previous version of Tor.
++ *
++ * "Journal" refers to the data that has been appended to the cache file
++ * since the reload/rebuild.
+  */
+ 
+ /** Helper: return 1 iff the router log is so big we want to rebuild the
+@@ -618,18 +621,17 @@
+ }
+ 
+ /** Add the signed_descriptor_t in <b>desc</b> to the router
+- * journal; change its saved_location to SAVED_IN_CACHE and set its
+- * offset appropriately. The location is set to SAVED_IN_JOURNAL
+- * only if we can't move the body to the cache memory map */
++ * journal; change its saved_location to SAVED_IN_JOURNAL and set its
++ * offset appropriately. */
+ static int
+ signed_desc_append_to_journal(signed_descriptor_t *desc,
+                               desc_store_t *store)
+ {
+-  char *fname = get_datadir_fname_suffix(store->fname_base, ".new");
++  char *fname = get_datadir_fname(store->fname_base);
+   const char *body = signed_descriptor_get_body_impl(desc,1);
+   size_t len = desc->signed_descriptor_len + desc->annotations_len;
+ 
+-  if (append_bytes_to_file(fname, body, len, 1)) {
++  if (gzappend_bytes_to_file(fname, body, len, 1)) {
+     log_warn(LD_FS, "Unable to store router descriptor");
+     tor_free(fname);
+     return -1;
+@@ -749,7 +751,7 @@
+       smartlist_add(chunk_list, c);
+     });
+ 
+-  if (write_chunks_to_file(fname, chunk_list, 1)<0) {
++  if (gzwrite_chunks_to_file(fname, chunk_list, 1)<0) {
+     log_warn(LD_FS, "Error writing router store to disk.");
+     goto done;
+   }
+@@ -760,7 +762,7 @@
+   }
+ 
+   errno = 0;
+-  load_file_into_mmap(store->mmap, fname);
++  gzload_file_into_mmap(store->mmap, fname);
+   if (!store->mmap) {
+     if (errno == ERANGE) {
+       /* empty store.*/
+@@ -793,10 +795,6 @@
+       signed_descriptor_get_body(sd); /* reconstruct and assert */
+     });
+ 
+-  tor_free(fname);
+-  fname = get_datadir_fname_suffix(store->fname_base, ".new");
+-  write_str_to_file(fname, "", 1);
+-
+   r = 0;
+   store->store_len = (size_t) offset;
+   store->journal_len = 0;
+@@ -819,10 +817,7 @@
+ router_reload_router_list_impl(desc_store_t *store)
+ {
+   char *fname = NULL, *altname = NULL;
+-  int read_from_old_location = 0;
+   int extrainfo = (store->type == EXTRAINFO_STORE);
+-  int r;
+-  size_t cache_size;
+   time_t now = time(NULL);
+   store->journal_len = store->store_len = 0;
+ 
+@@ -834,32 +829,19 @@
+     tor_munmap(store->mmap);
+ 
+   /* Load the cache file into an anonymous map first */
+-  if (load_file_into_mmap(store->mmap, fname) &&
+-      altname && file_status(altname) == FN_FILE) {
++  if (gzload_file_into_mmap(store->mmap, fname) && altname) {
+     log_notice(LD_DIR, "Couldn't read %s; trying to load routers from old "
+-               "location %s.", fname, altname);
+-    if (!(load_file_into_mmap(store->mmap, altname)))
+-      read_from_old_location = 1;
+-  }
+-  if (altname && !read_from_old_location) {
++               "uncompressed location %s.", fname, altname);
++    /* Read the old cache */
++    if (file_status(altname) == FN_FILE)
++      load_file_into_mmap(store->mmap, altname);
+     remove_file_if_very_old(altname, now);
+-  }
+-
+-  /* Remeber the size of the current data, so we can determine
+-   * whether we've read anything from the journal */
+-  cache_size = store->mmap->size;
+-  tor_free(fname);
+-  fname = get_datadir_fname_suffix(store->fname_base, ".new");
+-  r = 0;
+-  if ((file_status(fname) == FN_FILE) && (r = load_file_into_mmap(store->mmap, fname)))
+-    log_warn(LD_DIR, "Couldn't read journal %s", fname);
+-  if (read_from_old_location) {
+     tor_free(altname);
++    /* Load the old journal */
+     altname = get_datadir_fname_suffix(store->fname_alt_base, ".new");
+-    if (r)
++    if (file_status(altname) == FN_FILE)
+       load_file_into_mmap(store->mmap, altname);
+-    else
+-      remove_file_if_very_old(altname, now);
++    remove_file_if_very_old(altname, now);
+   }
+ 
+   /* Load router data from the map */
+@@ -878,8 +860,9 @@
+   tor_free(fname);
+   tor_free(altname);
+ 
+-  /* rebuild if journal was not empty or we used old locations */
+-  if ((store->mmap->size-cache_size>0) || read_from_old_location) {
++  /* Rebuild if we've read any data since we don't know
++   * how much of it is a journal */
++  if (store->mmap->size) {
+     /* Always clear the journal on startup.*/
+     router_rebuild_store(RRS_FORCE, store);
+   } else if (!extrainfo) {
+@@ -2660,9 +2643,9 @@
+     routerlist->desc_by_eid_map = sdmap_new();
+     routerlist->extra_info_map = eimap_new();
+ 
+-    routerlist->desc_store.fname_base = "cached-descriptors";
+-    routerlist->desc_store.fname_alt_base = "cached-routers";
+-    routerlist->extrainfo_store.fname_base = "cached-extrainfo";
++    routerlist->desc_store.fname_base = "cached-descriptors.gz";
++    routerlist->desc_store.fname_alt_base = "cached-descriptors";
++    routerlist->extrainfo_store.fname_base = "cached-extrainfo.gz";
+ 
+     routerlist->desc_store.type = ROUTER_STORE;
+     routerlist->extrainfo_store.type = EXTRAINFO_STORE;
+diff -uNr tor-0.2.3.16-alpha-anon_mmap//src/test/test_microdesc.c tor-0.2.3.16-alpha-gzipped_cache//src/test/test_microdesc.c
+--- tor-0.2.3.16-alpha-anon_mmap//src/test/test_microdesc.c	2012-06-09 14:28:32.806400322 -0400
++++ tor-0.2.3.16-alpha-gzipped_cache//src/test/test_microdesc.c	2012-06-09 14:42:20.594428666 -0400
+@@ -3,6 +3,7 @@
+ 
+ #include "orconfig.h"
+ #include "or.h"
++#include "gzutil.h"
+ 
+ #include "config.h"
+ #include "microdesc.h"
+@@ -147,9 +148,13 @@
+   test_mem_op(microdesc_get_body(md3), ==, test_md3_noannotation,
+               strlen(test_md3_noannotation));
+ 
+-  tor_asprintf(&fn, "%s"PATH_SEPARATOR"cached-microdescs.new",
++  tor_asprintf(&fn, "%s"PATH_SEPARATOR"cached-microdescs.gz",
+                options->DataDirectory);
+-  s = read_file_to_str(fn, RFTS_BIN, NULL);
++  map = tor_malloc(sizeof(tor_mmap_t));
++  map->data = NULL;
++  map->size = map->mapping_size = 0;
++  gzload_file_into_mmap(map, fn);
++  s = (char*)map->data;
+   tt_assert(s);
+   test_mem_op(microdesc_get_body(md1), ==, s + md1->off, md1->bodylen);
+   test_mem_op(microdesc_get_body(md2), ==, s + md2->off, md2->bodylen);
+@@ -160,6 +165,9 @@
+   tt_int_op(smartlist_len(md3->family), ==, 3);
+   tt_str_op(smartlist_get(md3->family, 0), ==, "nodeX");
+ 
++  tor_munmap(map);
++  free(map);
++
+   /* Now rebuild the cache! */
+   tt_int_op(microdesc_cache_rebuild(mc, 1), ==, 0);
+ 
+@@ -167,20 +175,11 @@
+   tt_int_op(md2->saved_location, ==, SAVED_IN_CACHE);
+   tt_int_op(md3->saved_location, ==, SAVED_IN_CACHE);
+ 
+-  /* The journal should be empty now */
+-  tor_free(s);
+-  s = read_file_to_str(fn, RFTS_BIN, NULL);
+-  tt_str_op(s, ==, "");
+-  tor_free(s);
+-  tor_free(fn);
+-
+   /* read the cache. */
+-  tor_asprintf(&fn, "%s"PATH_SEPARATOR"cached-microdescs",
+-              options->DataDirectory);
+   map = tor_malloc(sizeof(tor_mmap_t));
+   map->data = NULL;
+   map->size = map->mapping_size = 0;
+-  load_file_into_mmap(map, fn);
++  gzload_file_into_mmap(map, fn);
+   s = (char*)map->data;
+   test_mem_op(microdesc_get_body(md1), ==, s + md1->off, strlen(test_md1));
+   test_mem_op(microdesc_get_body(md2), ==, s + md2->off, strlen(test_md2));
