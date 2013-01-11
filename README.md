@@ -23,7 +23,7 @@ There are two ways to construct a PORTAL: using a chipped router (recommended), 
 * TP-LINK MR3020 - 4mb flash, 16mb RAM [WARNING: almost unusable]
 * TP-LINK WR703N - 4mb flash, 32mb RAM
 
-It is **highly recommended** to use a modified router. The modified MR11U and WR703N provide a better experience than the stock routers due to the additional RAM. 
+It is **highly recommended** to use a modified router. The modified MR11U and WR703N provide a better experience than the stock routers due to the additional RAM. The severe space constraints of the stock router make them very challenging to work with. Due to the lack of usable space, it is necessary to use an external disk to store the Tor packages. The stock router has only a single USB port, and the best option is to use a microSD in a 3G modem. 
 
 PORTAL Constuction Guide: Modified Router
 -----------------------------------------
@@ -53,10 +53,12 @@ PORTAL Construction Guide: Stock Router
     kmod-fs-ext4 kmod-scsi-core
     comgt chat
     block-mount
-* step 2. Format the microSD card as an `ext4` filesystem. Make sure you pass the `-O "^has_journal"` option to `mkfs.ext4`. Insert the microSD into the 3G modem and the modem into the router.
-* step 3. Configure the microSD card to appear as an overlay on the router. Edit `/etc/config/fstab` to contain a section for `/dev/sda1` with a mountpoint of `/overlay`, set to automatically mount. Reboot the router.
+* step 2. Format the microSD card as an `ext4` filesystem. Make sure you pass the `-O "^has_journal"` option to `mkfs.ext4`.
+    $ sudo mkfs.ext4 -O "^has_journal" /dev/$DEVICE
+Insert the microSD into the 3G modem and the modem into the router.
+* step 3. Configure the microSD card to appear as an overlay on the router. Edit `/etc/config/fstab` to contain a section for `/dev/sda1` with a mountpoint of `/overlay`, set to automatically mount. Reboot the router. See the [OpenWRT wiki](http://wiki.openwrt.org/doc/howto/extroot) for details, specifically the __New external overlay variant (pivot overlay)__ section.
 * step 4. Install the following packages:
     tor-alpha tor-alpha-geoip
     ipt-mod-conntrack ipt-mod-conntrack-extras
-* step 5. Configure Tor. 
+* step 5. Configure Tor. For an example see [this OpenWRT forum post](https://forum.openwrt.org/viewtopic.php?id=27354). Most of the configuration options are included in the PORTAL `files/etc/` in this project.
     
