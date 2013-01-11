@@ -1,0 +1,81 @@
+config defaults
+        option syn_flood '1'
+        option input 'ACCEPT'
+        option output 'ACCEPT'
+        option forward 'REJECT'
+        option disable_ipv6 '1'
+
+config zone
+        option name 'admin'
+        option network 'admin'
+        option input 'ACCEPT'
+        option output 'ACCEPT'
+        option forward 'REJECT'
+
+config zone
+        option name 'tor'
+        option network 'tor'
+        option input 'REJECT'
+        option output 'ACCEPT'
+        option forward 'REJECT'
+        option conntrack '1'
+
+config zone
+        option name 'internet'
+        option network 'internet'
+        option input 'REJECT'
+        option output 'ACCEPT'
+        option forward 'REJECT'
+        option masq '1'
+        option mtu_fix '1'
+
+config rule
+        option name 'Allow-DHCP-Renew'
+        option src 'internet'
+        option proto 'udp'
+        option dest_port '68'
+        option target 'ACCEPT'
+        option family 'ipv4'
+
+config rule
+        option name 'Allow-Ping'
+        option src 'internet'
+        option proto 'icmp'
+        option icmp_type 'echo-request'
+        option family 'ipv4'
+        option target 'ACCEPT'
+
+config rule
+        option name 'Allow-Tor-DHCP'
+        option src 'tor'
+        option proto 'udp'
+        option dest_port '67'
+        option target 'ACCEPT'
+        option family 'ipv4'
+
+config rule
+        option name 'Allow-Tor-DNS'
+        option src 'tor'
+        option proto 'udp'
+        option dest_port '9053'
+        option target 'ACCEPT'
+        option family 'ipv4'
+
+config rule
+        option name 'Allow-Tor-Transparent'
+        option src 'tor'
+        option proto 'tcp'
+        option dest_port '9040'
+        option target 'ACCEPT'
+        option family 'ipv4'
+
+config rule
+        option name 'Allow-Tor-SOCKS'
+        option src 'tor'
+        option proto 'tcp'
+        option dest_port '9050'
+        option target 'ACCEPT'
+        option family 'ipv4'
+
+config include
+        option path '/etc/firewall.user'
