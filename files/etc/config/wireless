@@ -1,0 +1,17 @@
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option channel '11'
+	option path 'platform/ar933x_wmac'
+	option htmode 'HT20'
+	option hwmode '11g'
+	option band '2G'
+
+config wifi-iface
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'GL-MIFI-666'
+	option encryption 'psk-mixed'
+	option key 'goodlife'
+#	option wds '1'
+	option ifname 'wlan0'

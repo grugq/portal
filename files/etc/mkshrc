@@ -1,0 +1,236 @@
+ -*- mode: shell-script -*-
+#
+# Interative configuration file for MirBSD Korn Shell.  Some of this
+# was taken from the sample .mkshrc included in the mksh istribution.
+#
+# Troels Henriksen <athas@sigkill.dk
+
+: ${EDITOR:=/bin/vi} ${TERM:=vt100} ${HOSTNAME:=$(ulimit -c 0;hostname -s 2>&-)}
+[[ $HOSTNAME = @(localhost|*([   ])) ]] && HOSTNAME=$(ulimit -c 0;hostname 2>&-)
+: ${HOSTNAME:=nil}; if (( USER_ID )); then PS1='$'; else PS1='#'; fi
+
+export red=$'\e[0;31m'
+export RED=$'\e[1;31m'
+export green=$'\e[0;32m'
+export GREEN=$'\e[1;32m'
+export blue=$'\e[0;34m'
+export BLUE=$'\e[1;34m'
+export purple=$'\e[0;35m'
+export PURPLE=$'\e[1;35m'
+export cyan=$'\e[0;36m'
+export CYAN=$'\e[1;36m'
+export white=$'\e[0;37m'
+export WHITE=$'\e[1;37m'
+export yellow=$'\e[0;33m'
+export YELLOW=$'\e[01;33m'
+export NC=$'\e[0m'
+
+function precmd {
+    typeset e=$?
+
+    (( e )) && print -n "$RED$e$white|$NC"
+}
+
+case $TERM in
+    *xterm*|rxvt*)
+        precd () {
+            print -n "\e]2;$1\a"
+        }
+        ;;
+    screen*)
+        precd () {
+            print -n "\e\"$1\e\134"
+        }
+        ;;
+    *)
+        precd () {
+        }
+        ;;
+esac
+
+function promptpath {
+    typeset d=${PWD:-?} n p=~;
+    [[ $p = ?(*/) ]] || d=${d/#$p/~}
+    (( (${%d}>0 ? ${%d}: ${#d}) > (n = (COLUMNS/3<7 ? 7: COLUMNS/3)) )) && {
+        d=${d:(-n)}; p=...; 
+    } || p=; print -nr -- "$p$d"
+}
+PS1='
+$(precmd)$green${USER:=$(ulimit -c 0;id -un 2>&-||print \?)}\
+$white@$cyan${HOSTNAME%%.*}$white:$yellow$(promptpath)$green%$NC '
+
+whence -p hd >&- || function hd {
+    hexdump -e '"%08.8_ax  " 8/1 "%02X " " - " 8/1 "%02X "' \
+        -e '"  |" "%_p"' -e '"|\n"' "$@"
+}
+
+export HISTFILE=~/.mksh_history
+export HISTSIZE=200000
+
+# Berkeley C shell compatible dirs, popd, and pushd functions
+# Z shell compatible chpwd() hook, used to update DIRSTACK[0]
+DIRSTACKBASE=$(realpath ~/. 2>&- || print -nr -- "$HOME")
+set -A DIRSTACK
+function chpwd {
+    precd "$(pwd|sed 's/'$(echo -n $HOME|sed 's/\//\\\//g')'/~/')"
+    DIRSTACK[0]=$(realpath . 2>&- || print -r -- "$PWD")
+    [[ $DIRSTACKBASE = ?(*/) ]] || \
+        DIRSTACK[0]=${DIRSTACK[0]/#$DIRSTACKBASE/~}
+    :
+}
+chpwd .
+function cd {
+    builtin cd "$@"
+    chpwd "$@"
+}
+function cd_csh {
+	typeset d t=${1/#~/$DIRSTACKBASE}
+
+	if ! d=$(builtin cd "$t" 2>&1); then
+		print -u2 "${1}: ${d##*$t - }."
+		return 1
+	fi
+	cd "$t"
+}
+function dirs {
+	typeset d dwidth
+	typeset -i isnoglob=0 fl=0 fv=0 fn=0 cpos=0
+
+	[[ $(set +o) == *@(-o noglob)@(| *) ]] && isnoglob=1
+	set -o noglob
+	while getopts ":lvn" d; do
+		case $d {
+		(l)	fl=1 ;;
+		(v)	fv=1 ;;
+		(n)	fn=1 ;;
+		(*)	print -u2 'Usage: dirs [-lvn].'
+			return 1 ;;
+		}
+	done
+	shift $((OPTIND - 1))
+	if (( $# > 0 )); then
+		print -u2 'Usage: dirs [-lvn].'
+		return 1
+	fi
+	if (( fv )); then
+		fv=0
+		while (( fv < ${#DIRSTACK[*]} )); do
+			d=${DIRSTACK[fv]}
+			(( fl )) && d=${d/#~/$DIRSTACKBASE}
+			print -r -- "$fv	$d"
+			let fv++
+		done
+	else
+		fv=0
+		while (( fv < ${#DIRSTACK[*]} )); do
+			d=${DIRSTACK[fv]}
+			(( fl )) && d=${d/#~/$DIRSTACKBASE}
+			(( dwidth = (${%d} > 0 ? ${%d} : ${#d}) ))
+			if (( fn && (cpos += dwidth + 1) >= 79 && \
+			    dwidth < 80 )); then
+				print
+				(( cpos = dwidth + 1 ))
+			fi
+			print -nr -- "$d "
+			let fv++
+		done
+		print
+	fi
+	(( isnoglob )) || set +o noglob
+	return 0
+}
+function popd {
+	typeset d fa
+	typeset -i isnoglob=0 n=1
+
+	[[ $(set +o) == *@(-o noglob)@(| *) ]] && isnoglob=1
+	set -o noglob
+	while getopts ":0123456789lvn" d; do
+		case $d {
+		(l|v|n)	fa="$fa -$d" ;;
+		(+*)	n=2
+			break ;;
+		(*)	print -u2 'Usage: popd [-lvn] [+<n>].'
+			return 1 ;;
+		}
+	done
+	shift $((OPTIND - n))
+	n=0
+	if (( $# > 1 )); then
+		print -u2 popd: Too many arguments.
+		return 1
+	elif [[ $1 = ++([0-9]) && $1 != +0 ]]; then
+		if (( (n = ${1#+}) >= ${#DIRSTACK[*]} )); then
+			print -u2 popd: Directory stack not that deep.
+			return 1
+		fi
+	elif [[ -n $1 ]]; then
+		print -u2 popd: Bad directory.
+		return 1
+	fi
+	if (( ${#DIRSTACK[*]} < 2 )); then
+		print -u2 popd: Directory stack empty.
+		return 1
+	fi
+	unset DIRSTACK[n]
+	set -A DIRSTACK -- "${DIRSTACK[@]}"
+	cd_csh "${DIRSTACK[0]}" || return 1
+	(( isnoglob )) || set +o noglob
+	dirs $fa
+}
+function pushd {
+	typeset d fa
+	typeset -i isnoglob=0 n=1
+
+	[[ $(set +o) == *@(-o noglob)@(| *) ]] && isnoglob=1
+	set -o noglob
+	while getopts ":0123456789lvn" d; do
+		case $d {
+		(l|v|n)	fa="$fa -$d" ;;
+		(+*)	n=2
+			break ;;
+		(*)	print -u2 'Usage: pushd [-lvn] [<dir>|+<n>].'
+			return 1 ;;
+		}
+	done
+	shift $((OPTIND - n))
+	if (( $# == 0 )); then
+		if (( ${#DIRSTACK[*]} < 2 )); then
+			print -u2 pushd: No other directory.
+			return 1
+		fi
+		d=${DIRSTACK[1]}
+		DIRSTACK[1]=${DIRSTACK[0]}
+		cd_csh "$d" || return 1
+	elif (( $# > 1 )); then
+		print -u2 pushd: Too many arguments.
+		return 1
+	elif [[ $1 = ++([0-9]) && $1 != +0 ]]; then
+		if (( (n = ${1#+}) >= ${#DIRSTACK[*]} )); then
+			print -u2 pushd: Directory stack not that deep.
+			return 1
+		fi
+		while (( n-- )); do
+			d=${DIRSTACK[0]}
+			unset DIRSTACK[0]
+			set -A DIRSTACK -- "${DIRSTACK[@]}" "$d"
+		done
+		cd_csh "${DIRSTACK[0]}" || return 1
+	else
+		set -A DIRSTACK -- placeholder "${DIRSTACK[@]}"
+		cd_csh "$1" || return 1
+	fi
+	(( isnoglob )) || set +o noglob
+	dirs $fa
+}
+
+export SHELL=`which mksh` MANWIDTH=80 LESSHISTFILE=-
+alias cls='print -n \\033c'
+alias ..='cd ..'
+alias ...='.. && ..'
+alias ....='... && ..'
+alias .....='.... && ..'
+alias ......='..... && ..'
+alias .......='...... && ..'
+
+ulimit -c unlimited

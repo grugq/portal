@@ -1,0 +1,39 @@
+# .oO( presenting )Oo.
+#--<{ PORTAL TORRC }>--
+#
+
+# handled by the init script.
+# PidFile /var/run/tor.pid
+# RunAsDaemon 1
+
+User tor
+
+# save the flash
+AvoidDiskWrites 1
+
+# .. useful if we ever use a tun0 vpn. can add -o "OutboundBindAddress=$(uci get)"
+# OutboundBindAddress 
+
+# options: debug, info, notice, warn, err
+Log notice syslog
+ProtocolWarnings 1
+
+# requires starting as root..
+#DisableAllSwap 1
+
+DataDirectory /var/lib/tor
+
+# never relay
+ClientOnly 1
+# prefer long uptime circuits for ssh
+LongLivedPorts 22
+
+VirtualAddrNetwork 10.192.0.0/10
+AutomapHostsOnResolve 1
+
+ClientDNSRejectInternalAddresses 1
+ClientRejectInternalAddresses 1
+
+SOCKSPort 172.16.8.1:9050 IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateClientProtocol
+TransPort 172.16.8.1:9040 IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateClientProtocol
+DNSPort 172.16.8.1:9053 IsolateClientProtocol IsolateDestAddr IsolateDestPort IsolateClientProtocol

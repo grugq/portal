@@ -1,0 +1,23 @@
+enable_transparent_tor() {
+  ifname=$(uci get network.sandbox.ifname)
+
+  # Allow direct access to the Tor SOCKS
+  iptables -t nat -A PREROUTING -i $ifname -p tcp --dport 9050 -j REDIRECT --to-ports 9050
+
+  # provide transparent routing for TCP and DNS
+  iptables -t nat -A PREROUTING -i $ifname -p udp --dport 53 -j REDIRECT --to-ports 9053
+  iptables -t nat -A PREROUTING -i $ifname -p tcp --syn -j REDIRECT --to-ports 9040
+}
+
+enable_transparent_tor
+
+force_dns() {
+    lanip=$(ifconfig br-lan |sed -n 's/.*dr:\(.*\) Bc.*/\1/p')
+    iptables -t nat -A PREROUTING -s 0/0 -p udp --dport 53 -j DNAT --to $lanip
+    iptables -t nat -A PREROUTING -s 0/0 -p tcp --dport 53 -j DNAT --to $lanip
+}
+force=$(uci get glconfig.general.force_dns)
+if [ -n "$force" ]; then
+    force_dns
+fi
+gl-firewall &
